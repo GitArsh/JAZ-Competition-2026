@@ -1,45 +1,97 @@
-import serial # Read serial data from Arduino
-import requests # Send data to ThingSpeak via HTTP requests
+import serial
+import requests
+import time
+import os
+from dotenv import load_dotenv
 
-import time # For timing ThingSpeak updates
-
-from dotenv import load_dotenv # Load environment variables from .env file
-import os # For environment variables (ThingSpeak API key)
-
+# 1. Load the secret API Key from the .env file
 load_dotenv()
+THINGSPEAK_API_KEY = os.getenv("THINGSPEAK_API_KEY")
 
-SERIAL_PORT = "COM3" # Match the port your Arduino is connected to (e.g., "COM3" on Windows or "/dev/ttyUSB0" on Linux)
-BAUD_RATE = 9600 # Match the baud rate set in your Arduino sketch
-THINGSPEAK_API_KEY = os.environ["THINGSPEAK_API_KEY"]
+# 2. Hardware and Cloud Configuration
+SERIAL_PORT = "/dev/cu.usbmodem2201" # Update this to your Mac's specific Arduino port
+BAUD_RATE = 115200
 THINGSPEAK_URL = "https://api.thingspeak.com/update"
-MIN_INTERVAL = 15  # ThingSpeak free tier limit: 1 update per 15 seconds
+MIN_INTERVAL = 15.1  # 15.1 seconds to be perfectly safe with ThingSpeak limits
 
-ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-print(f"Listening on {SERIAL_PORT}, logging to ThingSpeak...")
+# 3. The Waiting Room
+upload_queue = [] 
 
-last_post = 0.0 # Non-blocking timing for ThingSpeak updates
+def main():
+    if not THINGSPEAK_API_KEY:
+        print("CRITICAL ERROR: No API Key found. Check your .env file.")
+        return
 
-while True:
-    line = ser.readline().decode("utf-8", errors="replace").rstrip()
-    if not line:
-        continue
+    print(f"Connecting to Base Station on {SERIAL_PORT}...")
+    
+    try:
+        ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.5)
+        time.sleep(2) # Give the Arduino a moment to reset
+        print("System Online. Waiting for Wearable Sync...\n")
+        
+        last_post_time = 0.0 
 
-    print(line)
+        while True:
+            # --- PHASE 1: CATCH THE DATA ---
+            # If the Arduino is speaking, read the line
+            if ser.in_waiting > 0:
+                line = ser.readline().decode("utf-8", errors="replace").strip()
+                
+                # Ignore empty lines and decorative text from the wearable
+                if not line or "---" in line or line == "NO_DATA":
+                    continue
+                
+                print(f"[UART Received] {line}")
+                
+                # Verify it is our 4-part CSV format (Name, Total, Exp, Ctl)
+                parts = line.split(',')
+                if len(parts) == 4:
+                    upload_queue.append(parts) # Put the data in the waiting room
+                    print(f"   -> Added to Queue. (Items waiting: {len(upload_queue)})")
 
-    parts = line.split()
-    if len(parts) < 3:
-        continue
+            # --- PHASE 2: UPLOAD THE DATA ---
+            current_time = time.time()
+            
+            # If there is data waiting AND 15.1 seconds have passed since the last upload
+            if len(upload_queue) > 0 and (current_time - last_post_time) >= MIN_INTERVAL:
+                
+                # Pull the oldest set out of the waiting room
+                payload_data = upload_queue.pop(0) 
+                
+                exercise_name = payload_data[0]
+                total_reps = payload_data[1]
+                explosive = payload_data[2]
+                steady = payload_data[3]
+                
+                # Convert string name to ThingSpeak ID
+                exercise_id = 0
+                if exercise_name == "Pushup": exercise_id = 1
+                elif exercise_name == "Pullup": exercise_id = 2
+                elif exercise_name == "Squat": exercise_id = 3
+                
+                # Construct the ThingSpeak URL
+                request_url = (f"{THINGSPEAK_URL}?api_key={THINGSPEAK_API_KEY}"
+                               f"&field1={exercise_id}&field2={total_reps}"
+                               f"&field3={explosive}&field4={steady}")
+                
+                print(f"\n[Cloud Sync] Uploading {exercise_name} (Field 1={exercise_id}, 2={total_reps}, 3={explosive}, 4={steady})")
+                
+                response = requests.get(request_url)
+                
+                if response.status_code == 200 and response.text != "0":
+                    print(f"   -> Success! (ThingSpeak Entry: {response.text})")
+                else:
+                    print(f"   -> Error: HTTP {response.status_code}. ThingSpeak rejected the data.")
+                
+                # Reset the clock to enforce the next 15-second wait
+                last_post_time = time.time() 
 
-    value = parts[2] # Assuming the serial message is "LED status X", where X is the value we need
+    except KeyboardInterrupt:
+        print("\nShutting down Base Station connection.")
+        if 'ser' in locals() and ser.is_open:
+            ser.close()
+    except Exception as e:
+        print(f"Hardware Error: {e}")
 
-    now = time.time()
-    if now - last_post < MIN_INTERVAL: # Too soon to post again, skip this reading
-        continue
-
-    response = requests.get(f"{THINGSPEAK_URL}?api_key={THINGSPEAK_API_KEY}&field1={value}")
-    if response.status_code == 200 and response.text != "0":
-        print(f"  -> Posted field1={value} (entry {response.text})")
-    else:
-        print(f"  -> ThingSpeak error: {response.status_code} {response.text}")
-
-    last_post = now
+if __name__ == "__main__":
+    main()
