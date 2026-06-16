@@ -99,10 +99,16 @@ def main():
             if ser.in_waiting > 0:
                 line = ser.readline().decode("utf-8", errors="replace").strip()
                 
-                # Ignore empty lines and decorative text from the wearable
+                # Ignore empty lines and decorative text
                 if not line or "---" in line or line == "NO_DATA":
                     continue
                 
+                # NEW: Listen for the remote control Hash (#) button trigger!
+                if line == "FORCE_GOAL_UPDATE":
+                    print("\n[Manual Override] Hash button pressed. Refreshing goals from cloud...")
+                    calculate_and_send_master_goals(ser)
+                    continue
+
                 # Let Python print the Arduino's confirmation messages to your screen!
                 if line.startswith("[BASE STATION]"):
                     print(line)
